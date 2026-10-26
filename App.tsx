@@ -8,7 +8,7 @@ import { Button, ScrollView, StyleSheet, Text, View } from 'react-native';
 // Android AudioStream posts its events to the main queue and reads the state
 // when the event runs, not when it was queued.
 //
-// Case 1: start() then stop() right away. Expected status events: [true, false].
+// Case 1: await start(), then stop() right away. Expected status events: [true, false].
 //         Actual on Android: [false, false].
 // Case 2: let one buffer arrive, then stop() and start() back to back.
 //         Expected: no buffer from the old session after the restart.
@@ -19,7 +19,8 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export default function App() {
   const { stream } = useAudioStream({ sampleRate: 16000, channels: 1, encoding: 'int16' });
   const [log, setLog] = useState<string[]>([]);
-  const statuses = useRef<boolean[]>([]);
+  const statuses = useRef<{ isStreaming: boolean; at: number }[]>([]);
+  const tapAt = useRef(0);
   const buffers = useRef<{ session: number; timestamp: number; arrivedAt: number }[]>([]);
   const session = useRef(0);
 
@@ -27,7 +28,7 @@ export default function App() {
 
   useEffect(() => {
     const s = stream.addListener('audioStreamStatus', (e: AudioStreamStatus) => {
-      statuses.current.push(e.isStreaming);
+      statuses.current.push({ isStreaming: e.isStreaming, at: Date.now() - tapAt.current });
     });
     const b = stream.addListener('audioStreamBuffer', (e: AudioStreamBuffer) => {
       buffers.current.push({ session: session.current, timestamp: e.timestamp, arrivedAt: Date.now() });
@@ -38,9 +39,10 @@ export default function App() {
     };
   }, [stream.id]);
 
-  const start = () => {
+  // `start()` is an async native function; `stop()` is synchronous.
+  const start = async () => {
     session.current += 1;
-    stream.start();
+    await stream.start();
   };
 
   const case1 = async () => {
@@ -49,13 +51,16 @@ export default function App() {
       const { granted } = await requestRecordingPermissionsAsync();
       if (!granted) return print('microphone permission denied');
       statuses.current = [];
-      start();
+      tapAt.current = Date.now();
+      await start();
       stream.stop();
-      await wait(500);
-      const got = JSON.stringify(statuses.current);
+      await wait(1000);
+      const values = statuses.current.map((x) => x.isStreaming);
+      const got = JSON.stringify(values);
       print(`Case 1: start() then stop()`);
       print(`expected status events: [true,false]`);
       print(`actual status events:   ${got}`);
+      statuses.current.forEach((x, i) => print(`  #${i + 1} isStreaming=${x.isStreaming} arrived ${x.at} ms after the calls`));
       print(got === '[true,false]' ? 'PASS' : 'FAIL');
     } catch (e) {
       print(`error: ${String(e)}`);
@@ -68,7 +73,7 @@ export default function App() {
       const { granted } = await requestRecordingPermissionsAsync();
       if (!granted) return print('microphone permission denied');
       buffers.current = [];
-      start();
+      await start();
       const first = session.current;
       // wait for the first PCM buffer of this session
       const until = Date.now() + 3000;
@@ -76,7 +81,7 @@ export default function App() {
       if (buffers.current.length === 0) return print('no buffer arrived in 3 s, is the mic available?');
       // restart back to back
       stream.stop();
-      start();
+      await start();
       const second = session.current;
       const restartedAt = Date.now();
       await wait(400);
