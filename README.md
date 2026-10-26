@@ -72,7 +72,7 @@ it is still running.
 
 ## Notes
 
-- Fix: PR_LINK_PLACEHOLDER
+- Fix: https://github.com/expo/expo/pull/52275
 
 - The emulator's microphone delivers silence, which is enough: only the event order and state
   matter here.
