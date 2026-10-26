@@ -10,6 +10,7 @@ import { Button, ScrollView, StyleSheet, Text, View } from 'react-native';
 //
 // Case 1: await start(), then stop() right away. Expected status events: [true, false].
 //         Actual on Android: [false, false].
+// Case 3: a plain stop() still delivers the buffer that was being read.
 // Case 2: let one buffer arrive, then stop() and start() back to back.
 //         Expected: no buffer from the old session after the restart.
 //         Actual on Android: the old session's buffer is delivered after start().
@@ -75,31 +76,54 @@ export default function App() {
       buffers.current = [];
       await start();
       const first = session.current;
-      // wait for the first PCM buffer of this session
-      const until = Date.now() + 3000;
-      while (buffers.current.length === 0 && Date.now() < until) await wait(20);
-      if (buffers.current.length === 0) return print('no buffer arrived in 3 s, is the mic available?');
+      // Record for 1.2 s so every buffer of this session has a timestamp of about 1.2 s or more.
+      await wait(1200);
+      if (buffers.current.length === 0) return print('no buffer arrived in 1.2 s, is the mic available?');
       // restart back to back
       stream.stop();
+      const restartCalledAt = Date.now();
       await start();
       const second = session.current;
-      const restartedAt = Date.now();
-      await wait(400);
+      await wait(600);
       stream.stop();
       await wait(300);
-      // The native side measures `timestamp` from the start of the session that recorded the
-      // buffer. A buffer that arrives after start() #2 with a timestamp larger than the time since
-      // the restart cannot belong to session #2.
+      // Buffers that reach JS after stop() was called. In this 0.6 s window a buffer from the new
+      // session has a timestamp under 0.9 s; a buffer from the stopped session has about 1.2 s.
       const afterRestart = buffers.current
-        .filter((x) => x.session === second)
-        .map((x) => ({ timestamp: +x.timestamp.toFixed(3), sinceRestart: +((x.arrivedAt - restartedAt) / 1000).toFixed(3) }));
-      const stale = afterRestart.filter((x) => x.timestamp > x.sinceRestart + 0.03);
-      print(`Case 2: buffer, then stop() + start()`);
+        .filter((x) => x.arrivedAt >= restartCalledAt && x.session === second)
+        .map((x) => ({ timestamp: +x.timestamp.toFixed(3), sinceRestart: +((x.arrivedAt - restartCalledAt) / 1000).toFixed(3) }));
+      const stale = afterRestart.filter((x) => x.timestamp > 0.9);
+      print(`Case 2: 1.2 s of audio, then stop() + start()`);
       print(`sessions: first=${first} second=${second}`);
-      print(`buffers delivered after restart: ${afterRestart.length}`);
-      print(`from the stopped session: ${stale.length}`);
-      afterRestart.slice(0, 3).forEach((x, i) => print(`  #${i + 1} timestamp=${x.timestamp}s arrived ${x.sinceRestart}s after restart`));
+      print(`buffers delivered after the restart: ${afterRestart.length}`);
+      print(`from the stopped session (timestamp > 0.9 s): ${stale.length}`);
+      stale.forEach((x) => print(`  old: timestamp=${x.timestamp}s arrived ${x.sinceRestart}s after stop()`));
+      afterRestart.slice(0, 2).forEach((x, i) => print(`  #${i + 1} timestamp=${x.timestamp}s arrived ${x.sinceRestart}s after stop()`));
       print(stale.length === 0 ? 'PASS' : 'FAIL');
+    } catch (e) {
+      print(`error: ${String(e)}`);
+    }
+  };
+
+  // A plain stop() must still deliver the buffer that was being read when stop() was called.
+  const case3 = async () => {
+    setLog([]);
+    try {
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) return print('microphone permission denied');
+      buffers.current = [];
+      await start();
+      const until = Date.now() + 3000;
+      while (buffers.current.length === 0 && Date.now() < until) await wait(20);
+      const before = buffers.current.length;
+      stream.stop();
+      const stoppedAt = Date.now();
+      await wait(500);
+      const late = buffers.current.filter((x) => x.arrivedAt >= stoppedAt);
+      print(`Case 3: plain stop()`);
+      print(`buffers before stop: ${before}, delivered after stop: ${late.length}`);
+      print(`(the buffer being read at stop() time should still arrive)`);
+      print(late.length >= 1 ? 'PASS' : 'FAIL');
     } catch (e) {
       print(`error: ${String(e)}`);
     }
@@ -111,6 +135,7 @@ export default function App() {
       <View style={styles.buttons}>
         <Button title="Case 1: status after start+stop" onPress={case1} />
         <Button title="Case 2: old buffer after restart" onPress={case2} />
+        <Button title="Case 3: last buffer after plain stop" onPress={case3} />
       </View>
       <ScrollView contentContainerStyle={styles.log}>
         {log.map((line, i) => (
