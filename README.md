@@ -17,19 +17,43 @@ Grant the microphone permission when asked, then tap a button.
 
 ## Cases
 
-**Case 1: status after start() and stop().** The app calls `stream.start()` and `stream.stop()`
-back to back and collects the `audioStreamStatus` events for half a second.
-
-- Expected: `[true, false]`
-- Actual: `[false, false]`. Both events run after `stop()` and read the final state.
+**Case 1: status after start() and stop().** The app awaits `stream.start()`, calls
+`stream.stop()` right away, and collects the `audioStreamStatus` events for one second.
+Expected `[true, false]`.
 
 **Case 2: old buffer after restart.** The app starts the stream, waits for one PCM buffer, then
-calls `stop()` and `start()` back to back. It records every buffer delivered after the restart with
-the buffer's `timestamp`, which the native side measures from the start of its own session.
+calls `stop()` and `start()` back to back. Every buffer delivered after the restart is recorded with
+its `timestamp`, which the native side measures from the start of its own session, and with the
+time it arrived relative to the restart. A buffer whose timestamp is larger than the time since the
+restart was recorded by the stopped session. Expected: none.
 
-- Expected: no buffer from the stopped session is delivered after the restart.
-- Actual: the first buffer delivered after `start()` carries a timestamp from the stopped session,
-  larger than the time elapsed since the restart.
+## Results (Android 17 emulator, API 37, expo-audio 58.0.10, SDK 58)
+
+| | Before the fix | After the fix |
+| --- | --- | --- |
+| Case 1, 5 runs | `[true, false]` every run | `[true, false]` every run |
+| Case 2, 2 runs | 1 old buffer delivered after each restart, for example timestamp 0.249 s arriving 0.045 s before `start()` resolved | 0 old buffers; first buffer 0.233 s / 0.172 s, matching the new session |
+
+| Case 1, before | Case 2, before | Case 2, after |
+| --- | --- | --- |
+| ![case 1](media/case1-status-after-start-stop.png) | ![case 2 before](media/case2-old-buffer-after-restart.png) | ![case 2 after](media/case2-after-fix.png) |
+
+Case 1 does not reproduce from JavaScript. `stream.start()` is an async native function, so by the
+time `stop()` runs the queued `true` event has already been read. The issue's `[false, false]`
+comes from calling the native `start()` and `stop()` back to back on the same thread, which the
+reporter's JVM harness does. The fix still captures the value when the event is queued, so the
+report cannot read a later state.
+
+Case 2 reproduces on every run and is fixed by dropping queued buffers whose session has stopped.
+
+## Testing a patched expo-audio
+
+Android links `expo-audio` as a published artifact. To build it from the sources in
+`node_modules` instead, add this to `package.json` before `npx expo run:android`:
+
+```json
+"expo": { "autolinking": { "buildFromSource": ["expo-audio"] } }
+```
 
 ## Where it is in the source
 
@@ -46,30 +70,9 @@ private fun emitStatus() {
 `emitBufferEvent` posts the buffer the same way and never checks whether the session that produced
 it is still running.
 
-## Results (Android 17 emulator, API 37, expo-audio 58.0.10, SDK 58)
-
-**Case 1**, five runs of `start()` then `stop()`. Expected `[true, false]` every time. Observed:
-
-| Run | Status events |
-| --- | --- |
-| 1 | `[true]` |
-| 2 | `[false]` |
-| 3 | `[true]` |
-| 4 | `[false, true]` |
-| 5 | `[true]` |
-
-The value depends on when the queued block runs relative to `stop()`, and one of the two events is
-often missing.
-
-**Case 2**, one run. Five buffers were delivered after the restart. The first one arrived 0 s after
-`start()` with a timestamp of 3.163 s, measured from the start of the stopped session. The next
-ones carry timestamps that match the new session.
-
-| Case 1 | Case 2 |
-| --- | --- |
-| ![case 1](media/case1-status-after-start-stop.png) | ![case 2](media/case2-old-buffer-after-restart.png) |
-
 ## Notes
+
+- Fix: PR_LINK_PLACEHOLDER
 
 - The emulator's microphone delivers silence, which is enough: only the event order and state
   matter here.
