@@ -17,34 +17,43 @@ Grant the microphone permission when asked, then tap a button.
 
 ## Cases
 
-**Case 1: status after start() and stop().** The app awaits `stream.start()`, calls
-`stream.stop()` right away, and collects the `audioStreamStatus` events for one second.
-Expected `[true, false]`.
+**Case 1: status after start() and stop().** Await `stream.start()`, call `stream.stop()` right
+away, collect the `audioStreamStatus` events for one second. Expected `[true, false]`.
 
-**Case 2: old buffer after restart.** The app starts the stream, waits for one PCM buffer, then
-calls `stop()` and `start()` back to back. Every buffer delivered after the restart is recorded with
-its `timestamp`, which the native side measures from the start of its own session, and with the
-time it arrived relative to the restart. A buffer whose timestamp is larger than the time since the
-restart was recorded by the stopped session. Expected: none.
+**Case 2: old buffer after restart.** Await `start()`, record for 1.2 s, then call `stop()` and
+`await start()` back to back and watch for 0.6 s. A buffer from the stopped session carries a
+native `timestamp` of about 1.2 s; a buffer from the new session in that window stays under 0.9 s.
+Expected: no buffer with a timestamp over 0.9 s after the restart.
+
+**Case 3: last buffer after a plain stop().** Await `start()`, wait for a buffer, call `stop()`,
+count the buffers that arrive in the next 0.5 s. Shows what happens to the chunk that was being
+read when `stop()` was called.
 
 ## Results (Android 17 emulator, API 37, expo-audio 58.0.10, SDK 58)
 
-| | Before the fix | After the fix |
+| | Before the fix | With the fix (PR 52275) |
 | --- | --- | --- |
 | Case 1, 5 runs | `[true, false]` every run | `[true, false]` every run |
-| Case 2, 2 runs | 1 old buffer delivered after each restart, for example timestamp 0.249 s arriving 0.045 s before `start()` resolved | 0 old buffers; first buffer 0.233 s / 0.172 s, matching the new session |
+| Case 2, 10 runs | an old buffer after every restart | 1 run of 10 |
+| Case 3, 5 runs | 1 buffer delivered after every `stop()` | 0 |
 
-| Case 1, before | Case 2, before | Case 2, after |
+| Case 2, before | Case 2, with the fix | Case 3, with the fix |
 | --- | --- | --- |
-| ![case 1](media/case1-status-after-start-stop.png) | ![case 2 before](media/case2-old-buffer-after-restart.png) | ![case 2 after](media/case2-after-fix.png) |
+| ![case 2 before](media/case2-old-buffer-after-restart.png) | ![case 2 after](media/case2-after-fix.png) | ![case 3 after](media/case3-after-fix.png) |
 
-Case 1 does not reproduce from JavaScript. `stream.start()` is an async native function, so by the
-time `stop()` runs the queued `true` event has already been read. The issue's `[false, false]`
-comes from calling the native `start()` and `stop()` back to back on the same thread, which the
-reporter's JVM harness does. The fix still captures the value when the event is queued, so the
-report cannot read a later state.
+Notes on the numbers:
 
-Case 2 reproduces on every run and is fixed by dropping queued buffers whose session has stopped.
+- Case 1 does not reproduce from JavaScript. `stream.start()` is an async native function, so by the
+  time `stop()` runs the queued `true` event has already been read. The issue's `[false, false]`
+  comes from calling the native `start()` and `stop()` back to back on one thread, which the
+  reporter's JVM harness does. The fix captures the value when the event is queued, which closes
+  that path.
+- The one remaining Case 2 delivery with the fix was a buffer that had already been emitted to
+  JavaScript before `stop()` ran; it reached the JavaScript thread 1 ms after `stop()` returned.
+  No native check can retract an event that was already handed over.
+- Case 3 shows the trade-off the fix makes: the chunk being read when `stop()` is called is
+  discarded, which is what the issue asks for. Keeping it would also deliver it after an immediate
+  restart, because at the time it is queued nobody knows whether a restart follows.
 
 ## Testing a patched expo-audio
 
