@@ -20,7 +20,7 @@ export default function App() {
   const { stream } = useAudioStream({ sampleRate: 16000, channels: 1, encoding: 'int16' });
   const [log, setLog] = useState<string[]>([]);
   const statuses = useRef<boolean[]>([]);
-  const buffers = useRef<{ session: number; timestamp: number }[]>([]);
+  const buffers = useRef<{ session: number; timestamp: number; arrivedAt: number }[]>([]);
   const session = useRef(0);
 
   const print = (line: string) => setLog((l) => [...l, line]);
@@ -30,7 +30,7 @@ export default function App() {
       statuses.current.push(e.isStreaming);
     });
     const b = stream.addListener('audioStreamBuffer', (e: AudioStreamBuffer) => {
-      buffers.current.push({ session: session.current, timestamp: e.timestamp });
+      buffers.current.push({ session: session.current, timestamp: e.timestamp, arrivedAt: Date.now() });
     });
     return () => {
       s.remove();
@@ -45,49 +45,59 @@ export default function App() {
 
   const case1 = async () => {
     setLog([]);
-    const { granted } = await requestRecordingPermissionsAsync();
-    if (!granted) return print('microphone permission denied');
-    statuses.current = [];
-    start();
-    stream.stop();
-    await wait(500);
-    const got = JSON.stringify(statuses.current);
-    print(`Case 1: start() then stop()`);
-    print(`expected status events: [true,false]`);
-    print(`actual status events:   ${got}`);
-    print(got === '[true,false]' ? 'PASS' : 'FAIL');
+    try {
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) return print('microphone permission denied');
+      statuses.current = [];
+      start();
+      stream.stop();
+      await wait(500);
+      const got = JSON.stringify(statuses.current);
+      print(`Case 1: start() then stop()`);
+      print(`expected status events: [true,false]`);
+      print(`actual status events:   ${got}`);
+      print(got === '[true,false]' ? 'PASS' : 'FAIL');
+    } catch (e) {
+      print(`error: ${String(e)}`);
+    }
   };
 
   const case2 = async () => {
     setLog([]);
-    const { granted } = await requestRecordingPermissionsAsync();
-    if (!granted) return print('microphone permission denied');
-    buffers.current = [];
-    start();
-    const first = session.current;
-    // wait for the first PCM buffer of this session
-    const until = Date.now() + 3000;
-    while (buffers.current.length === 0 && Date.now() < until) await wait(20);
-    if (buffers.current.length === 0) return print('no buffer arrived in 3 s, is the mic available?');
-    // restart back to back
-    stream.stop();
-    start();
-    const second = session.current;
-    const restartedAt = Date.now();
-    await wait(400);
-    stream.stop();
-    await wait(300);
-    // A buffer that reaches JS after start() #2 but whose timestamp is measured from start #1
-    // (older than the time elapsed since the restart) belongs to the stopped session.
-    const afterRestart = buffers.current.filter((x) => x.session === second);
-    const elapsedAtEnd = (Date.now() - restartedAt) / 1000;
-    const stale = afterRestart.filter((x) => x.timestamp > elapsedAtEnd + 0.05);
-    print(`Case 2: buffer, then stop() + start()`);
-    print(`sessions: first=${first} second=${second}`);
-    print(`buffers delivered after restart: ${afterRestart.length}`);
-    print(`of those, timestamps from the stopped session: ${stale.length}`);
-    print(`first delivered after restart: ${JSON.stringify(afterRestart[0] ?? null)}`);
-    print(stale.length === 0 ? 'PASS' : 'FAIL');
+    try {
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) return print('microphone permission denied');
+      buffers.current = [];
+      start();
+      const first = session.current;
+      // wait for the first PCM buffer of this session
+      const until = Date.now() + 3000;
+      while (buffers.current.length === 0 && Date.now() < until) await wait(20);
+      if (buffers.current.length === 0) return print('no buffer arrived in 3 s, is the mic available?');
+      // restart back to back
+      stream.stop();
+      start();
+      const second = session.current;
+      const restartedAt = Date.now();
+      await wait(400);
+      stream.stop();
+      await wait(300);
+      // The native side measures `timestamp` from the start of the session that recorded the
+      // buffer. A buffer that arrives after start() #2 with a timestamp larger than the time since
+      // the restart cannot belong to session #2.
+      const afterRestart = buffers.current
+        .filter((x) => x.session === second)
+        .map((x) => ({ timestamp: +x.timestamp.toFixed(3), sinceRestart: +((x.arrivedAt - restartedAt) / 1000).toFixed(3) }));
+      const stale = afterRestart.filter((x) => x.timestamp > x.sinceRestart + 0.03);
+      print(`Case 2: buffer, then stop() + start()`);
+      print(`sessions: first=${first} second=${second}`);
+      print(`buffers delivered after restart: ${afterRestart.length}`);
+      print(`from the stopped session: ${stale.length}`);
+      afterRestart.slice(0, 3).forEach((x, i) => print(`  #${i + 1} timestamp=${x.timestamp}s arrived ${x.sinceRestart}s after restart`));
+      print(stale.length === 0 ? 'PASS' : 'FAIL');
+    } catch (e) {
+      print(`error: ${String(e)}`);
+    }
   };
 
   return (
